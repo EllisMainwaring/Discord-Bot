@@ -7,7 +7,7 @@ Multi-user Discord bot playground for the Thematic Project.
 1. Clone the repo.
 2. Copy the template folder to your name:
    - Example: copy `bots/_template` to `bots/John`
-3. In your folder, create `.env` from `.env.example` and paste your bot token.
+3. In your folder, change `.env.example` to `.env` and paste your bot token.
 4. Install dependencies - type the following into console:
    - `python -m venv .venv`
    - `./.venv/Scripts/activate`
