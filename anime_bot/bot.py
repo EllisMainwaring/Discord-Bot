@@ -6,7 +6,7 @@ import os
 import aiohttp
 
 # Load environment variables from the .env file
-# This is where your DISCORD_TOKEN should be stored
+# This is where your DISCORD_TOKEN should be stored. Find it here: https://discord.com/developers/applications
 load_dotenv()
 
 # Get the bot token from environment variables
