@@ -1,26 +1,33 @@
-# Discord-Bot
+# Anime Discord Bot
 
-Multi-user Discord bot playground for the Thematic Project.
+Discord bot for fetching anime data (AniList integration) for the Thematic Project.
 
-## Quick start (per person)
+## Quick start
 
 1. Clone the repo.
-2. Copy the template folder to your name:
-   - Example: copy `bots/_template` to `bots/John`
-3. In your folder, change `.env.example` to `.env` and paste your bot token.
-4. Install dependencies - type the following into console:
+2. Navigate into the project folder if needed: 
+   - `cd anime_bot`
+3. Create and activate a virtual environment:
    - `python -m venv .venv`
-   - `./.venv/Scripts/activate`
+   - Windows: `.\.venv\Scripts\activate`
+   - Mac/Linux: `source .venv/bin/activate`
+4. Install dependencies:
    - `pip install -r requirements.txt`
-5. Run your bot from your folder:
+5. Create a `.env` file in the 'anime_bot'and write the following:
+   - `DISCORD_TOKEN=your_bot_token_here`
+6. Run the bot:
    - `python bot.py`
 
 ## Folder layout
 
-- `bots/_template/` starter template for new users
-- `bots/<Name>/` each person works in their own folder
+- `bot.py` main entry point (this is the file you run)
+- `.env` stores your Discord token (not committed to git)
+- `requirements.txt` project dependencies
+- `discord.log` bot logs
+- `.gitignore` prevents sensitive files from being committed
 
 ## Notes
 
-- Each bot reads `DISCORD_TOKEN` from the `.env` in its own folder.
-- `.env` files are ignored by git, so tokens never get committed ! 
+- The bot reads `DISCORD_TOKEN` from the `.env` file.
+- `.env` is ignored by git, so your token will not be committed.
+- Always run the bot using `python bot.py`.
