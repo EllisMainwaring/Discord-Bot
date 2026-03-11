@@ -90,6 +90,10 @@ async def anime(ctx, *, anime_name: str):
         siteUrl
         averageScore
         genres
+        coverImage {
+            medium
+            large
+        }
       }
     }
     """
@@ -138,6 +142,9 @@ async def anime(ctx, *, anime_name: str):
 
         # Get genres and turn list into a comma-separated string
         genres = ", ".join(media["genres"]) if media["genres"] else "N/A"
+        
+        # Get cover image URL (use medium size if available)
+        image_url = media["coverImage"]["medium"] if media.get("coverImage") else None
 
         # Create a Discord embed (formatted message)
         embed = discord.Embed(
@@ -151,6 +158,7 @@ async def anime(ctx, *, anime_name: str):
         embed.add_field(name="Episodes", value=str(episodes), inline=True)
         embed.add_field(name="Average Score", value=str(score), inline=True)
         embed.add_field(name="Genres", value=genres, inline=False)
+        embed.set_image(url=image_url)
 
         # Send the embed to the Discord channel
         await ctx.send(embed=embed)
