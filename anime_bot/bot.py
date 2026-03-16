@@ -5,6 +5,9 @@ from dotenv import load_dotenv
 import os
 import aiohttp
 import json
+import requests
+import re
+import random
 
 # Load environment variables from the .env file
 # This is where your DISCORD_TOKEN should be stored. Find it here: https://discord.com/developers/applications
@@ -332,6 +335,85 @@ async def profile(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
+@bot.command()
+async def randoms(ctx):
+    """
+    Fetch anime information from AniList.
+    """
+    
+    # Tell the user the bot is working
+    await ctx.send(f"Displaying a random anime from AniList...")
 
+    # GraphQL query
+    # This tells AniList exactly which information we want back
+    query = """
+    query ($page: Int) {
+    Page(page: $page, perPage: 50)
+    {
+      media(type: ANIME) {
+        title {
+          romaji
+          english
+        }
+        episodes
+        description
+        siteUrl
+        averageScore
+        genres
+        }
+      }
+    }
+    """
+
+    # Selects a random page from AniList
+    ranPages = random.randint(1, 400)
+    variables = {"page": ranPages}
+
+    # Send POST request to AniList with the query and variables
+    res = requests.post(
+        "https://graphql.anilist.co",
+        json={"query": query, "variables": variables}
+    )
+
+    # Finds a random anime to display on the page chosen 
+    ranList = res.json()["data"]["Page"]["media"]
+    randomList = random.choice(ranList)
+    
+    # Use English title if available, otherwise use Romaji
+    title = randomList["title"]["english"] or randomList["title"]["romaji"]
+
+    # Get total episode count
+    episodes = randomList["episodes"] or "Unknown"
+
+    # Get description — strip HTML tags (AniList returns HTML like <br>, <i>), then limit length
+    raw_description = re.sub(r"<[^>]+>", "", randomList["description"] or "")
+    description = (raw_description.strip() or "No description available.")[:300] + "..."
+
+    # Get link to AniList page
+    site_url = randomList["siteUrl"]
+
+    # Get average score
+    score = randomList["averageScore"] or "N/A"
+
+    # Get genres and turn list into a comma-separated string
+    genres = ", ".join(randomList["genres"]) if randomList["genres"] else "N/A"
+
+    # Create a Discord embed (formatted message)
+    ranEmbed = discord.Embed(
+        title=title,
+        url=site_url,
+        description=description,
+        color=discord.Color.blue()
+    )
+
+    # Add extra fields to the embed
+    ranEmbed.add_field(name="Episodes", value=str(episodes), inline=True)
+    ranEmbed.add_field(name="Average Score", value=str(score), inline=True)
+    ranEmbed.add_field(name="Genres", value=genres, inline=False)
+
+    # Send the embed to the Discord channel
+    await ctx.send(embed=ranEmbed)
+    
 # Start the bot using your token
 bot.run(TOKEN)
+
