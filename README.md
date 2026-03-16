@@ -16,7 +16,7 @@ Discord bot for fetching anime data (AniList integration) for the Thematic Proje
 5. Create a `.env` file in the 'anime_bot'and write the following:
    - `DISCORD_TOKEN=your_bot_token_here`
 6. Run the bot:
-   - `python bot.py`
+   - `anime_bot/bot.py`
 
 ## Folder layout
 
