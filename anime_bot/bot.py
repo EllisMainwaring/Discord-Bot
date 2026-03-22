@@ -335,12 +335,12 @@ async def profile(ctx, member: discord.Member = None):
 
     await ctx.send(embed=embed)
 
-@bot.command()
+@bot.command(aliases=['random'])
 async def randoms(ctx):
     """
     Fetch anime information from AniList.
     """
-    
+  
     # Tell the user the bot is working
     await ctx.send(f"Displaying a random anime from AniList...")
 
@@ -365,7 +365,7 @@ async def randoms(ctx):
     }
     """
 
-    # Selects a random page from AniList
+    # Select a random page from AniList
     ranPages = random.randint(1, 400)
     variables = {"page": ranPages}
 
@@ -375,7 +375,7 @@ async def randoms(ctx):
         json={"query": query, "variables": variables}
     )
 
-    # Finds a random anime to display on the page chosen 
+    # Find a random anime to display on the page chosen 
     ranList = res.json()["data"]["Page"]["media"]
     randomList = random.choice(ranList)
     
@@ -414,6 +414,75 @@ async def randoms(ctx):
     # Send the embed to the Discord channel
     await ctx.send(embed=ranEmbed)
     
+@bot.command()
+async def charInfo(ctx, *, char_name):
+    """
+    Fetch character information from AniList.
+    The user can type any anime name after !charInfo.
+    """
+
+    # Tell the user the bot is working
+    await ctx.send(f"Searching for '{char_name}' on AniList...")
+
+    # GraphQL query
+    # This tells AniList exactly which information we want back
+    query = """
+    query ($search: String) {
+      Character(search: $search) {
+        name { 
+          full 
+        }
+        image {
+            medium
+            large
+        }
+        media (perPage: 1)
+        {
+          nodes {
+            title {
+              romaji
+              english
+            }
+          }
+        }
+        description
+        siteUrl
+      }
+    }
+    """
+
+    # Send POST request to AniList with the query and variables
+    variables = {"search": char_name}
+    res = requests.post(
+        "https://graphql.anilist.co",
+        json={"query": query, "variables": variables}
+    )
+
+    # Get the data necessary in order to display it
+    character = res.json()["data"]["Character"]
+    charNode = ((character.get("media") or {}).get("nodes") or [{}])[0]
+    title = charNode.get("title", {}).get("english") or charNode.get("title", {}).get("romaji") or character.get("name", {}).get("full") or "Unknown Title"
+    nameChar = character["name"]["full"]
+    raw_description = re.sub(r"<[^>]+>", "", character["description"] or "")
+    description = (raw_description.strip() or "No description available.")[:300] + "..."
+    site_url = character["siteUrl"]
+    image_url = character["image"]["medium"] if character.get("image") else None
+        
+    # Create a Discord embed (formatted message)
+    charEmbed = discord.Embed(
+      title=nameChar,
+      color=discord.Color.blue()
+        )
+    
+    # Add additional content to the embed
+    charEmbed.add_field(name="Featured in: ", value=str(title), inline=False)
+    charEmbed.add_field(name="Character description: ", value=str(description), inline=False)
+    charEmbed.add_field(name="AniList Character Profile: ", value=str(site_url), inline=False)
+    charEmbed.set_image(url=image_url)
+    
+    # Send the embed to the Discord channel
+    await ctx.send(embed=charEmbed)
+
 # Start the bot using your token
 bot.run(TOKEN)
 
