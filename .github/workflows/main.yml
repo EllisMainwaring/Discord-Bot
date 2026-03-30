@@ -1,49 +1,36 @@
 name: Discord Bot CI
 
-#when the action happens
-on: 
-  push: 
-	#runs everytime pushed to the branch
+on:
+  push:
     branches: [ "main" ]
-  #runs when trying to merge code
   pull_request:
     branches: [ "main" ]
 
 jobs:
-  #when does it work
-  build-and-test: 
+  build-and-test:
     runs-on: ubuntu-latest
-
     steps:
-	  #the actions to-do list
       - name: Checkout Code
         uses: actions/checkout@v4
-        #grabs the code from the repo and puts it on a VM
-      - name: Set Up Docker Buildx
+
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-        #prepares the VM to handle the docker
+
       - name: Build Docker Image
         run: |
-          docker build -t anime-bot-running .
-          #runs the Dockerfile, if library is missing it will fail here
-      - name: Startup Check
-        env: 
-		  #gets the DISCORD_TOKEN from the vault
+          docker build -t anilist-bot-test .
+
+      - name: Smoke Test (Startup Check)
+        env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         run: |
-          #start the container in the background
-          docker run -d --name test-container -e DISCORD_TOKEN=$DISCORD_TOKEN anime-bot-running
-
-          #give the bot some time to login
+          docker run -d --name test-container -e DISCORD_TOKEN=$DISCORD_TOKEN anilist-bot-test
           sleep 10
-
-          #check if the container is still running
-          if [ "$(docker inspect -f '{{state.running}}' test-container)" == "true" ]; then
+          if [ "$(docker inspect -f '{{.State.Running}}' test-container)" == "true" ]; then
             echo "Bot started successfully!"
             docker stop test-container
           else
-            echo "Bot failed or crashed!"
+            echo "Bot failed to start or crashed!"
             docker logs test-container
             exit 1
           fi
-
