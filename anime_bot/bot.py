@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import logging
 from dotenv import load_dotenv
 import os
@@ -48,6 +48,10 @@ bot.session = None
 # Path to the file that stores Discord -> AniList links
 LINKS_FILE = "linked_accounts.json"
 
+# Path to the file that tracks the last known airing state for each show.
+# This is how we detect when a new episode has dropped.
+TRACKER_FILE = "episode_tracker.json"
+
 
 def load_links() -> dict:
     """Load the Discord->AniList account links from disk."""
@@ -61,6 +65,25 @@ def save_links(links: dict):
     """Save the Discord->AniList account links to disk."""
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         json.dump(links, f, indent=2)
+
+
+def load_tracker() -> dict:
+    """
+    Load the episode tracker from disk.
+    Structure: { "media_id": { "next_episode": N, "title": "..." } }
+    'next_episode' is the episode number AniList says is coming next.
+    When that number goes up by 1, we know an episode just aired.
+    """
+    if not os.path.exists(TRACKER_FILE):
+        return {}
+    with open(TRACKER_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_tracker(tracker: dict):
+    """Save the episode tracker to disk."""
+    with open(TRACKER_FILE, "w", encoding="utf-8") as f:
+        json.dump(tracker, f, indent=2)
 
 
 def get_username(links: dict, discord_id) -> str | None:
@@ -152,6 +175,9 @@ async def fetch_anilist_user(session: aiohttp.ClientSession, username: str) -> d
 async def on_ready():
     # Create one reusable HTTP session for API calls
     bot.session = aiohttp.ClientSession()
+
+    # Start the background task that checks for new episodes
+    check_new_episodes.start()
 
     # Log that the bot is online
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
@@ -805,6 +831,214 @@ async def plan(ctx, *, anime_name: str = None):
         await ctx.send("Usage: `!plan <anime name>`")
         return
     await _handle_list_update(ctx, anime_name, "PLANNING", "Plan to Watch")
+
+
+# ---------------------------------------------------------------------------
+# Episode notification system
+# ---------------------------------------------------------------------------
+
+async def get_watching_list(session: aiohttp.ClientSession, username: str) -> list:
+    """
+    Fetch all anime a user currently has marked as CURRENT (watching) on AniList.
+    AniList lists are public, so no token is needed here.
+    Returns a list of media dicts, each containing id, title, and nextAiringEpisode.
+    """
+    query = """
+    query ($username: String) {
+      MediaListCollection(userName: $username, type: ANIME, status: CURRENT) {
+        lists {
+          entries {
+            media {
+              id
+              title { romaji english }
+              nextAiringEpisode {
+                episode
+                airingAt
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    async with session.post(
+        "https://graphql.anilist.co",
+        json={"query": query, "variables": {"username": username}}
+    ) as response:
+        data = await response.json()
+
+    collection = data.get("data", {}).get("MediaListCollection")
+    if not collection:
+        return []
+
+    # Flatten the nested lists -> entries structure into a simple list
+    entries = []
+    for lst in collection.get("lists", []):
+        for entry in lst.get("entries", []):
+            entries.append(entry["media"])
+    return entries
+
+
+@tasks.loop(minutes=30)
+async def check_new_episodes():
+    """
+    Background task that runs every 30 minutes.
+    For every linked user with notifications on, it:
+      1. Fetches their current watching list from AniList
+      2. Compares the 'next episode' number to what we last stored
+      3. If the number went up, a new episode aired — DM the user
+      4. Saves the updated state to episode_tracker.json
+    """
+    links = load_links()
+    tracker = load_tracker()
+
+    # Build two maps:
+    #   watchers:   media_id -> [discord_id, ...]  (who is watching each show)
+    #   media_info: media_id -> media dict          (airing data for each show)
+    watchers = {}
+    media_info = {}
+
+    for discord_id, entry in links.items():
+        # Skip users who have turned notifications off
+        if isinstance(entry, dict) and not entry.get("notifications", True):
+            continue
+
+        username = get_username(links, discord_id)
+        if not username:
+            continue
+
+        try:
+            watching = await get_watching_list(bot.session, username)
+        except Exception as e:
+            logging.error(f"Failed to fetch watching list for {username}: {e}")
+            continue
+
+        for media in watching:
+            mid = str(media["id"])
+            media_info[mid] = media
+            watchers.setdefault(mid, []).append(discord_id)
+
+    # Now check each watched show for a new episode
+    updated_tracker = dict(tracker)
+
+    for media_id, media in media_info.items():
+        next_ep = media.get("nextAiringEpisode")
+        title = media["title"]["english"] or media["title"]["romaji"]
+
+        # If AniList has no upcoming episode scheduled, nothing to track
+        if next_ep is None:
+            continue
+
+        current_next = next_ep["episode"]
+
+        # First time we've seen this show — just store the state, don't notify.
+        # We only want to notify on *changes*, not on first detection.
+        if media_id not in tracker:
+            updated_tracker[media_id] = {"next_episode": current_next, "title": title}
+            continue
+
+        stored_next = tracker[media_id]["next_episode"]
+
+        # The next-episode number has gone up, meaning the previous episode aired.
+        # e.g. stored was 5, now it's 6 → episode 5 just dropped.
+        if current_next > stored_next:
+            aired_episode = current_next - 1
+
+            for discord_id in watchers[media_id]:
+                try:
+                    user = await bot.fetch_user(int(discord_id))
+                    await user.send(
+                        f"Episode **{aired_episode}** of **{title}** has just aired! "
+                        f"Time to update your AniList."
+                    )
+                except discord.Forbidden:
+                    # User has DMs disabled — nothing we can do
+                    logging.warning(f"Could not DM user {discord_id} (DMs disabled).")
+                except Exception as e:
+                    logging.error(f"Failed to notify {discord_id} for {title}: {e}")
+
+        # Always update the stored state so we're ready to detect the next episode
+        updated_tracker[media_id] = {"next_episode": current_next, "title": title}
+
+    save_tracker(updated_tracker)
+
+
+@check_new_episodes.before_loop
+async def before_check_new_episodes():
+    # Wait until the bot is fully connected before the task starts running
+    await bot.wait_until_ready()
+
+
+# ---------------------------------------------------------------------------
+# Notification opt-in/out command
+# ---------------------------------------------------------------------------
+
+@bot.command()
+async def notify(ctx, setting: str = None):
+    """
+    Toggle new-episode DM notifications on or off.
+    Usage:
+      !notify on     — enable notifications
+      !notify off    — disable notifications
+      !notify        — show your current setting
+    """
+    links = load_links()
+    entry = links.get(str(ctx.author.id))
+
+    if not entry:
+        await ctx.send(
+            "You need to link an AniList account first. Use `!link <anilist_username>`."
+        )
+        return
+
+    # Upgrade old string-only entries to the dict format so we can store the setting
+    if isinstance(entry, str):
+        links[str(ctx.author.id)] = {"username": entry, "notifications": True}
+        entry = links[str(ctx.author.id)]
+
+    # No argument — show current status
+    if setting is None:
+        status = entry.get("notifications", True)
+        await ctx.send(
+            f"Episode notifications are currently **{'enabled' if status else 'disabled'}**.\n"
+            "Use `!notify on` or `!notify off` to change this."
+        )
+        return
+
+    if setting.lower() in ("on", "enable", "yes"):
+        entry["notifications"] = True
+        save_links(links)
+        await ctx.send(
+            "Episode notifications **enabled**! "
+            "I'll DM you when a new episode of anything on your watching list drops."
+        )
+    elif setting.lower() in ("off", "disable", "no"):
+        entry["notifications"] = False
+        save_links(links)
+        await ctx.send("Episode notifications **disabled**.")
+    else:
+        await ctx.send("Usage: `!notify on` or `!notify off`")
+
+
+@bot.command()
+async def testnotify(ctx):
+    """
+    Immediately sends you a fake episode notification DM so you can confirm
+    that the bot can reach you and the message looks right.
+    Usage: !testnotify
+    """
+    try:
+        await ctx.author.send(
+            "Episode **1** of **Test Anime** has just aired! "
+            "Time to update your AniList.\n"
+            "*(This is a test notification — everything is working!)*"
+        )
+        await ctx.send("Test notification sent! Check your DMs.")
+    except discord.Forbidden:
+        await ctx.send(
+            "Couldn't send you a DM — your privacy settings are blocking it. "
+            "Go to **Privacy & Safety** in Discord settings and enable DMs from server members."
+        )
 
 
 # Start the bot using your token
