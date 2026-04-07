@@ -559,10 +559,11 @@ async def charInfo(ctx, *, char_name):
 # AniList list-update helpers
 # ---------------------------------------------------------------------------
 
-async def search_anime_id(session: aiohttp.ClientSession, anime_name: str) -> tuple[int | None, str | None]:
+async def search_anime_id(session: aiohttp.ClientSession, anime_name: str) -> tuple[int | None, str | None, str | None, str | None]:
     """
-    Search AniList for an anime by name and return (media_id, display_title).
-    Returns (None, None) if nothing was found.
+    Search AniList for an anime by name and return
+    (media_id, display_title, cover_image_url, site_url).
+    Returns (None, None, None, None) if nothing was found.
     """
     query = """
     query ($search: String) {
@@ -572,6 +573,10 @@ async def search_anime_id(session: aiohttp.ClientSession, anime_name: str) -> tu
           romaji
           english
         }
+        coverImage {
+          large
+        }
+        siteUrl
       }
     }
     """
@@ -583,11 +588,13 @@ async def search_anime_id(session: aiohttp.ClientSession, anime_name: str) -> tu
 
     media = data.get("data", {}).get("Media")
     if not media:
-        return None, None
+        return None, None, None, None
 
     # Prefer English title; fall back to Romaji
     title = media["title"]["english"] or media["title"]["romaji"]
-    return media["id"], title
+    cover = media.get("coverImage", {}).get("large")
+    site_url = media.get("siteUrl")
+    return media["id"], title, cover, site_url
 
 
 async def update_anilist_status(
@@ -650,10 +657,10 @@ async def _handle_list_update(ctx, anime_name: str, status: str, status_label: s
         )
         return
 
-    # Search for the anime to get its AniList media ID
+    # Search for the anime to get its AniList media ID, cover image, and page URL
     await ctx.send(f"Searching for **{anime_name}**...")
     try:
-        media_id, title = await search_anime_id(bot.session, anime_name)
+        media_id, title, cover, site_url = await search_anime_id(bot.session, anime_name)
     except Exception as e:
         logging.error(str(e))
         await ctx.send("Something went wrong searching AniList.")
@@ -672,7 +679,17 @@ async def _handle_list_update(ctx, anime_name: str, status: str, status_label: s
         return
 
     if success:
-        await ctx.send(f"Updated **{title}** to **{status_label}** on your AniList!")
+        # Build a confirmation embed matching the style of the rest of the bot
+        embed = discord.Embed(
+            title=title,
+            url=site_url,
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Status updated to", value=status_label, inline=False)
+        embed.set_footer(text=f"Updated by {ctx.author.display_name}")
+        if cover:
+            embed.set_image(url=cover)
+        await ctx.send(embed=embed)
     else:
         await ctx.send(
             f"Failed to update **{title}**. "
