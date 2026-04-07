@@ -197,6 +197,39 @@ async def on_close():
 async def ping(ctx):
     await ctx.send("pong")
 
+# Command to allow users to see all the commands available using !helps
+@bot.command()
+async def helps(ctx):
+    await ctx.send("These are the currently available commands:"
+    "\n"
+    "\n ------IMPORTANT FOR FIRST TIME SETUP------"
+    "\n- '!authanilist' -> the bot will DM you an authorisation link"
+    "\n- '!settoken <your_token>' -> upon approval of the bot, put your token here and the bot will save and delete the message for security reasons"
+    "\n"
+    "\n ------ESSENTIAL COMMANDS------"
+    "\n- '!ping' -> displays 'pong' to check if the bot is working"
+    "\n- '!anime <name>' -> displays the details of the anime inputted"
+    "\n- '!random' -> displays a random anime from AniList"
+    "\n- '!charInfo' -> displays the details of the character inputted"
+    "\n"
+    "\n ------ANILIST ACCOUNT LINKING COMMANDS------"
+    "\n- '!link <username>' -> links your Discord account to an AniList username"
+    "\n- '!unlink' -> unlinks your Discord account from that AniList username"
+    "\n- '!profile' -> displays your AniList account stats"
+    "\n- '!profile @user' -> displays another user's AniList account stats"
+    "\n"
+    "\n ------ANILIST LIST UPDATING COMMANDS------"
+    "\n- '!watching <anime>' -> marks an anime as currently watching"
+    "\n- '!completed <anime>' -> marks an anime as completed"
+    "\n- '!pause <anime>' -> puts an anime on hold"
+    "\n- '!drop <anime>' -> puts an anime as dropped"
+    "\n- '!plan <anime>' -> adds an anime to your plan to watch"
+    "\n"
+    "\n ------NOTIFICATIONS COMMANDS------"
+    "\n- '!notify on' -> enables episode drop notifications (on by default)"
+    "\n- '!notify off' -> disables notifications"
+    "\n- '!notify' -> checks current notification settings"
+    "\n- '!testnotify' -> sends a test DM to confirm notifications are working")
 
 # Main command to search for any anime using AniList
 # Usage example: !anime naruto
