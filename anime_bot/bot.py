@@ -10,11 +10,14 @@ import re
 import random
 
 # Load environment variables from the .env file
-# This is where your DISCORD_TOKEN should be stored. Find it here: https://discord.com/developers/applications
+# This is where your DISCORD_TOKEN and ANILIST_CLIENT_ID should be stored.
 load_dotenv()
 
 # Get the bot token from environment variables
 TOKEN = os.getenv("DISCORD_TOKEN")
+
+# Get the AniList OAuth client ID (needed to build the auth link for users)
+ANILIST_CLIENT_ID = os.getenv("ANILIST_CLIENT_ID")
 
 # If the token is missing, stop the program
 if not TOKEN:
@@ -58,6 +61,49 @@ def save_links(links: dict):
     """Save the Discord->AniList account links to disk."""
     with open(LINKS_FILE, "w", encoding="utf-8") as f:
         json.dump(links, f, indent=2)
+
+
+def get_username(links: dict, discord_id) -> str | None:
+    """
+    Return the AniList username for a Discord user.
+    Handles both the old format (plain string) and new format (dict with 'username').
+    """
+    entry = links.get(str(discord_id))
+    if entry is None:
+        return None
+    if isinstance(entry, str):
+        return entry
+    return entry.get("username")
+
+
+def get_token(links: dict, discord_id) -> str | None:
+    """
+    Return the stored AniList OAuth token for a Discord user, or None if not set.
+    Only the new dict format stores tokens.
+    """
+    entry = links.get(str(discord_id))
+    if isinstance(entry, dict):
+        return entry.get("token")
+    return None
+
+
+def set_token(links: dict, discord_id, token: str):
+    """
+    Store (or update) the AniList OAuth token for a Discord user.
+    If their entry is still the old plain-string format, convert it to a dict first.
+    """
+    key = str(discord_id)
+    entry = links.get(key)
+
+    # Convert old string-only entries to the richer dict format
+    if isinstance(entry, str):
+        links[key] = {"username": entry, "token": token}
+    elif isinstance(entry, dict):
+        entry["token"] = token
+    else:
+        # No linked account yet — store just the token for now.
+        # The user should !link first, but we save the token regardless.
+        links[key] = {"username": None, "token": token}
 
 
 async def fetch_anilist_user(session: aiohttp.ClientSession, username: str) -> dict | None:
@@ -291,7 +337,7 @@ async def profile(ctx, member: discord.Member = None):
     target = member or ctx.author
 
     links = load_links()
-    anilist_username = links.get(str(target.id))
+    anilist_username = get_username(links, target.id)
 
     if not anilist_username:
         if target == ctx.author:
@@ -482,6 +528,284 @@ async def charInfo(ctx, *, char_name):
     
     # Send the embed to the Discord channel
     await ctx.send(embed=charEmbed)
+
+# ---------------------------------------------------------------------------
+# AniList list-update helpers
+# ---------------------------------------------------------------------------
+
+async def search_anime_id(session: aiohttp.ClientSession, anime_name: str) -> tuple[int | None, str | None]:
+    """
+    Search AniList for an anime by name and return (media_id, display_title).
+    Returns (None, None) if nothing was found.
+    """
+    query = """
+    query ($search: String) {
+      Media(search: $search, type: ANIME) {
+        id
+        title {
+          romaji
+          english
+        }
+      }
+    }
+    """
+    async with session.post(
+        "https://graphql.anilist.co",
+        json={"query": query, "variables": {"search": anime_name}}
+    ) as response:
+        data = await response.json()
+
+    media = data.get("data", {}).get("Media")
+    if not media:
+        return None, None
+
+    # Prefer English title; fall back to Romaji
+    title = media["title"]["english"] or media["title"]["romaji"]
+    return media["id"], title
+
+
+async def update_anilist_status(
+    session: aiohttp.ClientSession,
+    token: str,
+    media_id: int,
+    status: str
+) -> bool:
+    """
+    Update the authenticated user's list entry for a given anime.
+
+    AniList status values:
+      CURRENT   -> currently watching
+      COMPLETED -> finished
+      PAUSED    -> on hold
+      DROPPED   -> dropped
+      PLANNING  -> plan to watch
+
+    Returns True if the update succeeded, False otherwise.
+    """
+    mutation = """
+    mutation ($mediaId: Int, $status: MediaListStatus) {
+      SaveMediaListEntry(mediaId: $mediaId, status: $status) {
+        id
+        status
+      }
+    }
+    """
+    # The Authorization header tells AniList which user is making the request
+    headers = {"Authorization": f"Bearer {token}"}
+
+    async with session.post(
+        "https://graphql.anilist.co",
+        json={"query": mutation, "variables": {"mediaId": media_id, "status": status}},
+        headers=headers
+    ) as response:
+        data = await response.json()
+
+    # If there are errors in the response, the update failed
+    if data.get("errors"):
+        logging.error(f"AniList mutation error: {data['errors']}")
+        return False
+
+    return data.get("data", {}).get("SaveMediaListEntry") is not None
+
+
+async def _handle_list_update(ctx, anime_name: str, status: str, status_label: str):
+    """
+    Shared logic for all five list-update commands.
+    Looks up the user's token, searches for the anime, then sends the mutation.
+    """
+    links = load_links()
+
+    # Check the user has stored an OAuth token via !settoken
+    token = get_token(links, ctx.author.id)
+    if not token:
+        await ctx.send(
+            "You haven't linked your AniList token yet.\n"
+            "Use `!authanilist` to see how to get and store your token."
+        )
+        return
+
+    # Search for the anime to get its AniList media ID
+    await ctx.send(f"Searching for **{anime_name}**...")
+    try:
+        media_id, title = await search_anime_id(bot.session, anime_name)
+    except Exception as e:
+        logging.error(str(e))
+        await ctx.send("Something went wrong searching AniList.")
+        return
+
+    if not media_id:
+        await ctx.send(f"Could not find an anime matching **{anime_name}** on AniList.")
+        return
+
+    # Send the update mutation to AniList on behalf of the user
+    try:
+        success = await update_anilist_status(bot.session, token, media_id, status)
+    except Exception as e:
+        logging.error(str(e))
+        await ctx.send("Something went wrong updating your AniList.")
+        return
+
+    if success:
+        await ctx.send(f"Updated **{title}** to **{status_label}** on your AniList!")
+    else:
+        await ctx.send(
+            f"Failed to update **{title}**. "
+            "Your token may have expired — try `!settoken <new_token>` to refresh it."
+        )
+
+
+# ---------------------------------------------------------------------------
+# OAuth setup commands
+# ---------------------------------------------------------------------------
+
+@bot.command()
+async def authanilist(ctx):
+    """
+    Explains how to authorise the bot to update your AniList.
+    The bot owner must set ANILIST_CLIENT_ID in .env first.
+    Usage: !authanilist
+    """
+    if not ANILIST_CLIENT_ID:
+        await ctx.send(
+            "The bot owner hasn't set up an AniList API client yet.\n"
+            "They need to create one at **https://anilist.co/settings/developer** "
+            "and add `ANILIST_CLIENT_ID=<id>` to the `.env` file."
+        )
+        return
+
+    # Build the AniList implicit-flow URL.
+    # 'response_type=token' means AniList will put the access token directly in
+    # the redirect URL — no server needed to catch a callback.
+    auth_url = (
+        f"https://anilist.co/api/v2/oauth/authorize"
+        f"?client_id={ANILIST_CLIENT_ID}&response_type=token"
+    )
+
+    # Send instructions as a DM so the token isn't pasted publicly
+    try:
+        await ctx.author.send(
+            "**How to connect your AniList account:**\n\n"
+            f"1. Open this link: {auth_url}\n"
+            "2. Click **Authorise** on AniList.\n"
+            "3. You'll be redirected to a page — copy the access token\n"
+            "4. Come back here and type:\n"
+            "   `!settoken <paste your token here>`\n\n"
+            "Keep your token private — anyone with it can edit your AniList!"
+        )
+        await ctx.send("I've sent you a DM with instructions!")
+    except discord.Forbidden:
+        # The user has DMs disabled — fall back to the channel
+        await ctx.send(
+            "I couldn't DM you (your DMs may be off).\n"
+            f"Go to this link to authorise: <{auth_url}>\n"
+            "Then use `!settoken <your_token>` — preferably in a private channel."
+        )
+
+
+@bot.command()
+async def settoken(ctx, token: str = None):
+    """
+    Store your AniList OAuth token so the bot can update your list.
+    For security, use this command in a DM or delete your message after sending.
+    Usage: !settoken <your_anilist_token>
+    """
+    if not token:
+        await ctx.send("Usage: `!settoken <your_anilist_token>`\nUse `!authanilist` to get your token.")
+        return
+
+    links = load_links()
+
+    # If the user hasn't linked a username yet, remind them
+    username = get_username(links, ctx.author.id)
+    if not username:
+        await ctx.send(
+            "Note: you haven't linked an AniList username yet. "
+            "Use `!link <anilist_username>` so your `!profile` command works too."
+        )
+
+    # Store the token
+    set_token(links, ctx.author.id, token)
+    save_links(links)
+
+    # Try to delete the message so the token isn't visible in chat
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass  # Bot doesn't have permission to delete messages — that's fine
+
+    await ctx.send(
+        "Token saved! You can now use `!watching`, `!completed`, `!pause`, `!drop`, and `!plan`."
+    )
+
+
+# ---------------------------------------------------------------------------
+# List-status commands
+# ---------------------------------------------------------------------------
+
+@bot.command()
+async def watching(ctx, *, anime_name: str = None):
+    """
+    Mark an anime as currently watching on your AniList.
+    Usage: !watching <anime name>
+    Example: !watching Attack on Titan
+    """
+    if not anime_name:
+        await ctx.send("Usage: `!watching <anime name>`")
+        return
+    await _handle_list_update(ctx, anime_name, "CURRENT", "Currently Watching")
+
+
+@bot.command()
+async def completed(ctx, *, anime_name: str = None):
+    """
+    Mark an anime as completed on your AniList.
+    Usage: !completed <anime name>
+    Example: !completed Fullmetal Alchemist Brotherhood
+    """
+    if not anime_name:
+        await ctx.send("Usage: `!completed <anime name>`")
+        return
+    await _handle_list_update(ctx, anime_name, "COMPLETED", "Completed")
+
+
+@bot.command()
+async def pause(ctx, *, anime_name: str = None):
+    """
+    Mark an anime as on-hold (paused) on your AniList.
+    Usage: !pause <anime name>
+    Example: !pause Bleach
+    """
+    if not anime_name:
+        await ctx.send("Usage: `!pause <anime name>`")
+        return
+    await _handle_list_update(ctx, anime_name, "PAUSED", "On Hold")
+
+
+@bot.command()
+async def drop(ctx, *, anime_name: str = None):
+    """
+    Mark an anime as dropped on your AniList.
+    Usage: !drop <anime name>
+    Example: !drop Berserk
+    """
+    if not anime_name:
+        await ctx.send("Usage: `!drop <anime name>`")
+        return
+    await _handle_list_update(ctx, anime_name, "DROPPED", "Dropped")
+
+
+@bot.command()
+async def plan(ctx, *, anime_name: str = None):
+    """
+    Add an anime to your Plan to Watch list on AniList.
+    Usage: !plan <anime name>
+    Example: !plan Vinland Saga
+    """
+    if not anime_name:
+        await ctx.send("Usage: `!plan <anime name>`")
+        return
+    await _handle_list_update(ctx, anime_name, "PLANNING", "Plan to Watch")
+
 
 # Start the bot using your token
 bot.run(TOKEN)
