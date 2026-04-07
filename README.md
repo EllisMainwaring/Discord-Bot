@@ -1,11 +1,11 @@
 # Anime Discord Bot
 
-Discord bot for fetching anime data (AniList integration) for the Thematic Project.
+Discord bot for fetching anime data and managing AniList lists (AniList integration) for the Thematic Project.
 
 ## Quick start
 
 1. Clone the repo.
-2. Navigate into the project folder if needed: 
+2. Navigate into the project folder if needed:
    - `cd anime_bot`
 3. Create and activate a virtual environment:
    - `python -m venv .venv`
@@ -13,21 +13,68 @@ Discord bot for fetching anime data (AniList integration) for the Thematic Proje
    - Mac/Linux: `source .venv/bin/activate`
 4. Install dependencies:
    - `pip install -r requirements.txt`
-5. Create a `.env` file in the 'anime_bot'and write the following:
+5. Create a `.env` file in the `anime_bot` folder with the following:
    - `DISCORD_TOKEN=your_bot_token_here`
+   - `ANILIST_CLIENT_ID=your_anilist_client_id` (needed for list update commands — create one at https://anilist.co/settings/developer, set the redirect URL to `https://anilist.co/api/v2/oauth/pin`)
 6. Run the bot:
-   - `anime_bot/bot.py`
+   - `python anime_bot/bot.py`
 
 ## Folder layout
 
-- `bot.py` main entry point (this is the file you run)
-- `.env` stores your Discord token (not committed to git)
-- `requirements.txt` project dependencies
-- `discord.log` bot logs
-- `.gitignore` prevents sensitive files from being committed
+- `bot.py` — main entry point (this is the file you run)
+- `.env` — stores your Discord token and AniList client ID (not committed to git)
+- `linked_accounts.json` — stores Discord → AniList account links and OAuth tokens (auto-created, not committed)
+- `episode_tracker.json` — tracks airing state for episode notifications (auto-created, not committed)
+- `requirements.txt` — project dependencies
+- `discord.log` — bot logs
+- `.gitignore` — prevents sensitive files from being committed
+
+## Commands
+
+### General
+| Command | Description |
+|---|---|
+| `!ping` | Check the bot is alive |
+| `!anime <name>` | Search for an anime and display its info |
+| `!random` | Display a random anime |
+| `!charInfo <name>` | Look up a character |
+
+### AniList account linking
+| Command | Description |
+|---|---|
+| `!link <username>` | Link your Discord account to an AniList username |
+| `!unlink` | Remove your AniList link |
+| `!profile` | View your AniList stats |
+| `!profile @user` | View another user's AniList stats |
+
+### AniList list updating
+These commands update your AniList directly from Discord. Requires a one-time token setup (see below).
+
+| Command | Description |
+|---|---|
+| `!watching <anime>` | Mark an anime as currently watching |
+| `!completed <anime>` | Mark an anime as completed |
+| `!pause <anime>` | Put an anime on hold |
+| `!drop <anime>` | Mark an anime as dropped |
+| `!plan <anime>` | Add an anime to your plan to watch |
+
+**First time setup:**
+1. Run `!authanilist` — the bot will DM you an authorisation link
+2. Click the link, approve the bot on AniList, then copy your access token from the redirect URL
+3. Run `!settoken <your_token>` — the bot saves it and deletes your message
+
+### Episode notifications
+The bot checks AniList every 30 minutes and DMs you when a new episode of something on your watching list has aired.
+
+| Command | Description |
+|---|---|
+| `!notify on` | Enable episode drop notifications (on by default) |
+| `!notify off` | Disable notifications |
+| `!notify` | Check your current notification setting |
+| `!testnotify` | Send a test DM to confirm notifications are working |
 
 ## Notes
 
-- The bot reads `DISCORD_TOKEN` from the `.env` file.
-- `.env` is ignored by git, so your token will not be committed.
-- Always run the bot using `python bot.py`.
+- `.env` is ignored by git — your tokens will never be committed.
+- Always run the bot with `python bot.py` from inside the `anime_bot` folder.
+- Episode notifications require your AniList list to be public (the default).
