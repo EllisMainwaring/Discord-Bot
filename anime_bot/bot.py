@@ -197,6 +197,39 @@ async def on_close():
 async def ping(ctx):
     await ctx.send("pong")
 
+# Command to set the bot avatar using an attached animated GIF
+# Usage: attach a GIF file and send !animatedav
+@bot.command()
+async def animatedav(ctx):
+    """
+    Set the bot's avatar from an attached animated GIF.
+    """
+    if not ctx.message.attachments:
+        await ctx.send(
+            "Please attach an animated GIF to this command. Use `!animatedav` with a GIF attachment."
+        )
+        return
+
+    attachment = ctx.message.attachments[0]
+    content_type = attachment.content_type or ""
+    if "gif" not in content_type and not attachment.filename.lower().endswith(".gif"):
+        await ctx.send("Error: The attachment must be an animated GIF.")
+        return
+
+    if attachment.size > 256000:
+        await ctx.send("Error: The GIF is too large. Discord avatar files must be under 256 KB.")
+        return
+
+    try:
+        avatar_bytes = await attachment.read()
+        await bot.user.edit(avatar=avatar_bytes)
+        await ctx.send("Avatar updated successfully!")
+    except discord.HTTPException as err:
+        await ctx.send(f"Error: Could not update avatar: {err}")
+    except Exception as err:
+        logging.error(f"Animated avatar update failed: {err}")
+        await ctx.send("Error: Something went wrong while updating the avatar.")
+
 # Command to allow users to see all the commands available using !helps
 @bot.command()
 async def helps(ctx):
@@ -208,6 +241,7 @@ async def helps(ctx):
     "\n"
     "\n ------ESSENTIAL COMMANDS------"
     "\n- '!ping' -> displays 'pong' to check if the bot is working"
+    "\n- '!animatedav' -> set the bot avatar using an attached animated GIF"
     "\n- '!anime <name>' -> displays the details of the anime inputted"
     "\n- '!random' -> displays a random anime from AniList"
     "\n- '!charInfo' -> displays the details of the character inputted"
