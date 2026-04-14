@@ -34,3 +34,23 @@ jobs:
             docker logs test-container
             exit 1
           fi
+
+  deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Deploy to Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd ~/Discord-Bot
+            git pull origin main
+            docker stop anilist-bot || true
+            docker rm anilist-bot || true
+            docker build -t anilist-bot .
+            docker run -d --name anilist-bot -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anilist-bot    

@@ -1,0 +1,10 @@
+name = Docker Build Check
+
+on:
+push:
+braches: [ "dev" ]
+
+jobs:
+runs-on: ubuntu-latest
+build-and-test:
+
