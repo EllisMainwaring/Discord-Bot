@@ -24,7 +24,11 @@ jobs:
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         run: |
-          docker run -d --name test-container -e DISCORD_TOKEN=$DISCORD_TOKEN anilist-bot-test
+          docker run -d --name test-container \
+            -e DISCORD_TOKEN=$DISCORD_TOKEN \
+            -e ANILIST_CLIENT_ID=$ANILIST_CLIENT_ID \
+            -e ANILIST_CLIENT_SECRET=$ANILIST_CLIENT_SECRET \
+            anilist-bot-test
           sleep 10
           if [ "$(docker inspect -f '{{.State.Running}}' test-container)" == "true" ]; then
             echo "Bot started successfully!"
@@ -53,4 +57,8 @@ jobs:
             docker stop anime-bot-running || true
             docker rm anime-bot-running || true
             docker build -t anime-bot-image .
-            docker run -d --name anime-bot-running -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anime-bot-image
+            docker run -d --name anime-bot-running \
+              -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} \
+              -e ANILIST_CLIENT_ID=${{ secrets.ANILIST_CLIENT_ID }} \
+              -e ANILIST_CLIENT_SECRET=${{ secrets.ANILIST_CLIENT_SECRET }} \
+              anime-bot-image
