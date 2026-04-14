@@ -48,9 +48,9 @@ jobs:
           username: ${{ secrets.REMOTE_USER }}
           key: ${{secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd ~/Discord-Bot
+            cd /home/ubuntu/bot1/Discord-Bot
             git pull origin main
-            docker stop anilist-bot || true
-            docker rm anilist-bot || true
-            docker build -t anilist-bot .
-            docker run -d --name anilist-bot -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anilist-bot    
+            docker stop anime-bot-running || true
+            docker rm anime-bot-running || true
+            docker build -t anime-bot-image .
+            docker run -d --name anime-bot-running -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anilist-bot
