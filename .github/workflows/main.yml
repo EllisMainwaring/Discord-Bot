@@ -53,4 +53,4 @@ jobs:
             docker stop anime-bot-running || true
             docker rm anime-bot-running || true
             docker build -t anime-bot-image .
-            docker run -d --name anime-bot-running -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anilist-bot
+            docker run -d --name anime-bot-running -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} anime-bot-image
