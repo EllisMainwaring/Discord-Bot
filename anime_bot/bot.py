@@ -1,13 +1,17 @@
 import discord
 from discord.ext import commands, tasks
+from discord.ui import View, Select
 import logging
 from dotenv import load_dotenv
 import os
 import aiohttp
+import asyncio
 import json
 import requests
 import re
 import random
+import sqlite3
+import time
 
 # Load environment variables from the .env file
 # This is where your DISCORD_TOKEN and ANILIST_CLIENT_ID should be stored.
@@ -52,6 +56,51 @@ LINKS_FILE = "linked_accounts.json"
 # This is how we detect when a new episode has dropped.
 TRACKER_FILE = "episode_tracker.json"
 
+# ---------------------------------------------------------------------------
+# SQLite database (used by the voting system)
+# ---------------------------------------------------------------------------
+
+# Connect to (or create) votes.db — this file sits next to bot.py
+db = sqlite3.connect("votes.db", check_same_thread=False)
+cur = db.cursor()
+
+# polls — one row per poll session
+cur.execute("""
+CREATE TABLE IF NOT EXISTS polls (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER,
+    message_id INTEGER,
+    creator_id INTEGER,
+    end_time   REAL,
+    active     INTEGER
+)
+""")
+
+# options — each anime added to a poll
+cur.execute("""
+CREATE TABLE IF NOT EXISTS options (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    poll_id INTEGER,
+    title   TEXT,
+    votes   INTEGER DEFAULT 0
+)
+""")
+
+# user_votes — prevents a user from voting more than once per poll
+cur.execute("""
+CREATE TABLE IF NOT EXISTS user_votes (
+    poll_id   INTEGER,
+    user_id   INTEGER,
+    option_id INTEGER,
+    PRIMARY KEY (poll_id, user_id)
+)
+""")
+
+db.commit()
+
+# Maximum number of anime options allowed per poll
+MAX_OPTIONS = 10
+
 
 def load_links() -> dict:
     """Load the Discord->AniList account links from disk."""
@@ -84,6 +133,71 @@ def save_tracker(tracker: dict):
     """Save the episode tracker to disk."""
     with open(TRACKER_FILE, "w", encoding="utf-8") as f:
         json.dump(tracker, f, indent=2)
+
+
+def clean_html(text: str) -> str:
+    """Strip HTML tags from AniList descriptions and truncate to 300 characters."""
+    if not text:
+        return "No description."
+    return re.sub("<.*?>", "", text)[:300] + "..."
+
+
+async def search_anime(name: str) -> dict | None:
+    """
+    Lightweight AniList search that returns just the resolved title.
+    Used by the voting system to validate and normalise anime names.
+    Returns {"title": "..."} or None if not found.
+    """
+    query = """
+    query ($search: String) {
+      Media(search: $search, type: ANIME) {
+        title { romaji english }
+      }
+    }
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": {"search": name}}
+        ) as r:
+            if r.status != 200:
+                return None
+            data = await r.json()
+
+    if "errors" in data:
+        return None
+
+    media = data.get("data", {}).get("Media")
+    if not media:
+        return None
+
+    return {"title": media["title"]["english"] or media["title"]["romaji"]}
+
+
+def get_active_poll() -> int | None:
+    """Return the id of the current active poll, or None if there isn't one."""
+    cur.execute("SELECT id FROM polls WHERE active=1 ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def get_sorted(poll_id: int) -> list:
+    """Return poll options sorted by votes descending."""
+    cur.execute("SELECT id, title, votes FROM options WHERE poll_id=?", (poll_id,))
+    return sorted(cur.fetchall(), key=lambda x: -x[2])
+
+
+def parse_duration(duration: str) -> int | None:
+    """
+    Convert a duration string like "60", "30s", "5m", "1h", "2d" into seconds.
+    Returns None if the format is unrecognised.
+    """
+    match = re.match(r"(\d+)([smhd]?)", duration.lower().strip())
+    if not match:
+        return None
+    value, unit = match.groups()
+    value = int(value)
+    return {"": value, "s": value, "m": value * 60, "h": value * 3600, "d": value * 86400}.get(unit)
 
 
 def get_username(links: dict, discord_id) -> str | None:
@@ -181,6 +295,14 @@ async def on_ready():
 
     # Log that the bot is online
     logging.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+
+    # If a poll was active when the bot last shut down, resume its timer
+    cur.execute("SELECT id FROM polls WHERE active=1 ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    if row:
+        poll_id = row[0]
+        await update_vote_message(poll_id)
+        bot.loop.create_task(vote_timer(poll_id))
 
 
 # This runs when the bot shuts down
@@ -1056,6 +1178,508 @@ async def testnotify(ctx):
             "Couldn't send you a DM — your privacy settings are blocking it. "
             "Go to **Privacy & Safety** in Discord settings and enable DMs from server members."
         )
+
+
+# ---------------------------------------------------------------------------
+# !genre command — browse anime by genre with pagination and sort
+# ---------------------------------------------------------------------------
+
+class AnimeView(View):
+    """Paginated embed view for genre results. Includes navigation buttons and a sort dropdown."""
+
+    def __init__(self, anime_list: list, genre: str):
+        super().__init__(timeout=180)
+        self.current_sort = "Popularity"
+        self.anime_list = anime_list
+        self.genre = genre
+        self.index = 0
+        self.add_item(SortDropdown(self))
+
+    def create_embed(self) -> discord.Embed:
+        anime = self.anime_list[self.index]
+        embed = discord.Embed(
+            title=anime["title"]["english"] or anime["title"]["romaji"],
+            description=clean_html(anime["description"]),
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Episodes", value=anime["episodes"] or "Unknown", inline=True)
+        embed.add_field(name="Score", value=anime["averageScore"] or "N/A", inline=True)
+        embed.add_field(name="Genres", value=", ".join(anime["genres"]), inline=False)
+        embed.set_image(url=anime["coverImage"]["large"])
+        embed.set_footer(text=f"{self.index + 1}/{len(self.anime_list)} • Sort by: {self.current_sort}")
+        return embed
+
+    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
+    async def first(self, interaction, button):
+        self.index = 0
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction, button):
+        if self.index > 0:
+            self.index -= 1
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction, button):
+        if self.index < len(self.anime_list) - 1:
+            self.index += 1
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    async def last(self, interaction, button):
+        self.index = len(self.anime_list) - 1
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+
+class SortDropdown(Select):
+    """Dropdown that re-fetches the genre list from AniList with a new sort order."""
+
+    SORT_LABELS = {
+        "POPULARITY_DESC": "Popularity",
+        "TRENDING_DESC":   "Trending",
+        "TITLE_ROMAJI":    "A-Z",
+        "TITLE_ROMAJI_DESC": "Z-A",
+        "START_DATE_DESC": "Latest",
+        "START_DATE":      "Oldest",
+        "FAVOURITES_DESC": "Favourites",
+        "SCORE_DESC":      "Score",
+    }
+
+    def __init__(self, view_ref: AnimeView):
+        options = [
+            discord.SelectOption(label=label, value=value)
+            for value, label in self.SORT_LABELS.items()
+        ]
+        super().__init__(placeholder="Sort results...", options=options)
+        self.view_ref = view_ref
+
+    async def callback(self, interaction):
+        await interaction.response.defer()
+
+        query = """
+        query ($genre: String, $sort: [MediaSort]) {
+          Page(perPage: 10) {
+            media(genre_in: [$genre], type: ANIME, sort: $sort) {
+              title { romaji english }
+              episodes
+              description
+              averageScore
+              genres
+              coverImage { large }
+            }
+          }
+        }
+        """
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://graphql.anilist.co",
+                json={"query": query, "variables": {"genre": self.view_ref.genre, "sort": self.values[0]}}
+            ) as r:
+                if r.status != 200:
+                    return await interaction.followup.send("API error.", ephemeral=True)
+                data = await r.json()
+
+        media = data.get("data", {}).get("Page", {}).get("media")
+        if not media:
+            return await interaction.followup.send("No results.", ephemeral=True)
+
+        self.view_ref.current_sort = self.SORT_LABELS.get(self.values[0], "Unknown")
+        self.view_ref.anime_list = media
+        self.view_ref.index = 0
+
+        await interaction.edit_original_response(embed=self.view_ref.create_embed(), view=self.view_ref)
+
+
+@bot.command()
+async def genre(ctx, *, genre: str):
+    """
+    Browse the top 10 anime for a given genre with pagination and sorting.
+    Usage: !genre Action
+    """
+    query = """
+    query ($genre: String) {
+      Page(perPage: 10) {
+        media(genre_in: [$genre], type: ANIME, sort: POPULARITY_DESC) {
+          title { romaji english }
+          episodes
+          description
+          averageScore
+          genres
+          coverImage { large }
+        }
+      }
+    }
+    """
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            "https://graphql.anilist.co",
+            json={"query": query, "variables": {"genre": genre.title()}}
+        ) as r:
+            if r.status != 200:
+                return await ctx.send("API error.")
+            data = await r.json()
+
+    anime_list = data.get("data", {}).get("Page", {}).get("media")
+    if not anime_list:
+        return await ctx.send(f"No anime found for genre **{genre.title()}**.")
+
+    view = AnimeView(anime_list, genre.title())
+    await ctx.send(embed=view.create_embed(), view=view)
+
+
+# ---------------------------------------------------------------------------
+# Voting system — UI classes
+# ---------------------------------------------------------------------------
+
+def build_vote_embed(poll_id: int, end_time: float) -> discord.Embed:
+    """Build the live poll embed showing current standings and time remaining."""
+    emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    options = get_sorted(poll_id)
+
+    desc = ""
+    for i, o in enumerate(options):
+        if i >= len(emojis):
+            break
+        desc += f"{emojis[i]} {o[1]} ({o[2]})\n"
+
+    remaining = max(0, int(end_time - time.time()))
+    h, m, s = remaining // 3600, (remaining % 3600) // 60, remaining % 60
+    desc += f"\nOptions: {len(options)}/{MAX_OPTIONS}"
+    desc += f"\n⏳ Ends in {h:02}:{m:02}:{s:02}"
+
+    embed = discord.Embed(title="🎌 Anime Voting System", description=desc, color=discord.Color.orange())
+    return embed
+
+
+async def update_vote_message(poll_id: int):
+    """Fetch the poll's Discord message and edit it with the latest embed."""
+    cur.execute("SELECT channel_id, message_id, end_time, active FROM polls WHERE id=?", (poll_id,))
+    poll = cur.fetchone()
+    if not poll:
+        return
+
+    channel_id, message_id, end_time, active = poll
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        msg = await channel.fetch_message(message_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return
+
+    view = VoteView()
+    # Disable all buttons once the poll has ended
+    if active == 0:
+        for item in view.children:
+            item.disabled = True
+
+    await msg.edit(embed=build_vote_embed(poll_id, end_time), view=view)
+
+
+class VoteView(View):
+    """The main poll message view — Add Anime, Vote, and End buttons."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Add Anime", style=discord.ButtonStyle.primary)
+    async def add(self, interaction, button):
+        await interaction.response.send_modal(AddAnimeModal())
+
+    @discord.ui.button(label="Vote", style=discord.ButtonStyle.success)
+    async def vote(self, interaction, button):
+        poll_id = get_active_poll()
+        if not poll_id:
+            return await interaction.response.send_message("No active poll.", ephemeral=True)
+
+        cur.execute("SELECT active FROM polls WHERE id=?", (poll_id,))
+        row = cur.fetchone()
+        if not row or row[0] == 0:
+            return await interaction.response.send_message("Voting has ended.", ephemeral=True)
+
+        cur.execute("SELECT id, title FROM options WHERE poll_id=?", (poll_id,))
+        rows = cur.fetchall()
+        if not rows:
+            return await interaction.response.send_message("No options added yet.", ephemeral=True)
+
+        options = [discord.SelectOption(label=r[1], value=str(r[0])) for r in rows]
+        await interaction.response.send_message("Choose an anime:", view=VoteSelect(options), ephemeral=True)
+
+    @discord.ui.button(label="End", style=discord.ButtonStyle.danger)
+    async def end(self, interaction, button):
+        poll_id = get_active_poll()
+        if not poll_id:
+            return await interaction.response.send_message("No active poll.", ephemeral=True)
+
+        cur.execute("SELECT creator_id FROM polls WHERE id=?", (poll_id,))
+        row = cur.fetchone()
+        if not row or interaction.user.id != row[0]:
+            return await interaction.response.send_message("Only the poll creator can end it.", ephemeral=True)
+
+        cur.execute("UPDATE polls SET active=0 WHERE id=?", (poll_id,))
+        db.commit()
+        await update_vote_message(poll_id)
+        await interaction.response.send_message("Poll ended.", ephemeral=True)
+
+
+class AddAnimeModal(discord.ui.Modal, title="Add Anime"):
+    """Modal (popup form) that lets a user type an anime name to add to the poll."""
+
+    name = discord.ui.TextInput(label="Anime Name")
+
+    async def on_submit(self, interaction):
+        poll_id = get_active_poll()
+        if not poll_id:
+            return await interaction.response.send_message("No active poll.", ephemeral=True)
+
+        cur.execute("SELECT active FROM polls WHERE id=?", (poll_id,))
+        row = cur.fetchone()
+        if not row or row[0] == 0:
+            return await interaction.response.send_message("Poll has ended.", ephemeral=True)
+
+        cur.execute("SELECT COUNT(*) FROM options WHERE poll_id=?", (poll_id,))
+        if cur.fetchone()[0] >= MAX_OPTIONS:
+            return await interaction.response.send_message("Maximum options reached.", ephemeral=True)
+
+        try:
+            anime = await search_anime(self.name.value)
+        except Exception:
+            return await interaction.response.send_message("API error. Try again.", ephemeral=True)
+
+        if not anime:
+            return await interaction.response.send_message("Anime not found.", ephemeral=True)
+
+        # Prevent duplicates (case-insensitive)
+        cur.execute(
+            "SELECT 1 FROM options WHERE poll_id=? AND LOWER(title)=LOWER(?)",
+            (poll_id, anime["title"])
+        )
+        if cur.fetchone():
+            return await interaction.response.send_message("That anime is already in the poll.", ephemeral=True)
+
+        cur.execute("INSERT INTO options (poll_id, title, votes) VALUES (?, ?, 0)", (poll_id, anime["title"]))
+        db.commit()
+
+        await update_vote_message(poll_id)
+        await interaction.response.send_message(f"Added **{anime['title']}** to the poll.", ephemeral=True)
+
+
+class VoteSelect(View):
+    """Ephemeral view sent to a user when they click Vote, containing the anime dropdown."""
+
+    def __init__(self, options: list):
+        super().__init__(timeout=60)
+        self.add_item(VoteDropdown(options))
+
+
+class VoteDropdown(Select):
+    """Dropdown that records a user's vote, swapping their previous vote if they change it."""
+
+    def __init__(self, options: list):
+        super().__init__(options=options)
+
+    async def callback(self, interaction):
+        poll_id = get_active_poll()
+        if not poll_id:
+            return await interaction.response.send_message("Voting has ended.", ephemeral=True)
+
+        cur.execute("SELECT active FROM polls WHERE id=?", (poll_id,))
+        row = cur.fetchone()
+        if not row or row[0] == 0:
+            return await interaction.response.send_message("Voting has ended.", ephemeral=True)
+
+        user_id = interaction.user.id
+        new_option_id = int(self.values[0])
+
+        # If the user already voted, remove their previous vote first
+        cur.execute("SELECT option_id FROM user_votes WHERE poll_id=? AND user_id=?", (poll_id, user_id))
+        prev = cur.fetchone()
+        if prev:
+            cur.execute(
+                "UPDATE options SET votes = CASE WHEN votes > 0 THEN votes - 1 ELSE 0 END WHERE id=?",
+                (prev[0],)
+            )
+
+        cur.execute("INSERT OR REPLACE INTO user_votes VALUES (?, ?, ?)", (poll_id, user_id, new_option_id))
+        cur.execute("UPDATE options SET votes = votes + 1 WHERE id=?", (new_option_id,))
+        db.commit()
+
+        await update_vote_message(poll_id)
+        await interaction.response.send_message("Vote recorded!", ephemeral=True)
+
+
+class StopVoteView(View):
+    """Sent in response to !vote_stop — gives the creator options for what to do with the poll."""
+
+    def __init__(self, poll_id: int):
+        super().__init__(timeout=60)
+        self.poll_id = poll_id
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.secondary)
+    async def continue_vote(self, interaction, button):
+        await interaction.response.send_message("Vote continues.", ephemeral=True)
+
+    @discord.ui.button(label="View Results", style=discord.ButtonStyle.success)
+    async def view_results(self, interaction, button):
+        results = get_sorted(self.poll_id)
+        if not results:
+            return await interaction.response.send_message("No votes yet.", ephemeral=True)
+
+        total = sum(r[2] for r in results) or 1
+        text = "📊 **Current Results**\n\n"
+        for i, r in enumerate(results, 1):
+            text += f"{i}. {r[1]} — {r[2]} votes ({r[2] / total * 100:.0f}%)\n"
+
+        await interaction.response.send_message(text, ephemeral=True)
+
+    @discord.ui.button(label="Delete Poll", style=discord.ButtonStyle.danger)
+    async def delete_poll(self, interaction, button):
+        cur.execute("SELECT channel_id, message_id FROM polls WHERE id=?", (self.poll_id,))
+        row = cur.fetchone()
+
+        cur.execute("DELETE FROM polls WHERE id=?", (self.poll_id,))
+        cur.execute("DELETE FROM options WHERE poll_id=?", (self.poll_id,))
+        cur.execute("DELETE FROM user_votes WHERE poll_id=?", (self.poll_id,))
+        db.commit()
+
+        if row:
+            channel = interaction.client.get_channel(row[0])
+            if channel:
+                try:
+                    msg = await channel.fetch_message(row[1])
+                    await msg.delete()
+                except Exception:
+                    pass
+
+        await interaction.response.send_message("Poll deleted.", ephemeral=True)
+
+
+# ---------------------------------------------------------------------------
+# Voting system — background timer
+# ---------------------------------------------------------------------------
+
+async def vote_timer(poll_id: int):
+    """
+    Runs in the background for the duration of a poll.
+    Updates the countdown on the embed every few seconds, then posts final results.
+    Uses a smart delay — updates more frequently in the final minute.
+    """
+    while True:
+        cur.execute("SELECT active, end_time FROM polls WHERE id=?", (poll_id,))
+        row = cur.fetchone()
+        if not row:
+            return  # Poll was deleted
+        active, end_time = row
+        if active == 0:
+            return  # Poll was ended manually
+
+        now = time.time()
+        if now >= end_time:
+            break  # Timer expired
+
+        await update_vote_message(poll_id)
+
+        remaining = end_time - now
+        # Update more frequently as time runs out to keep the countdown accurate
+        if remaining <= 60:
+            delay = 1
+        elif remaining <= 300:
+            delay = 5
+        else:
+            delay = 10
+
+        await asyncio.sleep(delay)
+
+    # Mark the poll as ended
+    cur.execute("UPDATE polls SET active=0 WHERE id=?", (poll_id,))
+    db.commit()
+
+    # Post final results in the channel
+    cur.execute("SELECT channel_id FROM polls WHERE id=?", (poll_id,))
+    row = cur.fetchone()
+    if not row:
+        return
+
+    channel = bot.get_channel(row[0])
+    if not channel:
+        return
+
+    results = get_sorted(poll_id)
+    if not results:
+        return await channel.send("Poll ended with no votes.")
+
+    total = sum(r[2] for r in results) or 1
+    text = "🏁 **Final Results**\n\n"
+    for i, r in enumerate(results[:3], 1):
+        text += f"{i}. {r[1]} — {r[2]} votes ({r[2] / total * 100:.0f}%)\n"
+
+    # Handle ties at the top
+    top_score = results[0][2]
+    winners = [r[1] for r in results if r[2] == top_score]
+    text += "\n"
+    if len(winners) > 1:
+        text += "🤝 Tie: " + ", ".join(winners)
+    else:
+        text += f"🏆 Winner: **{winners[0]}**"
+
+    await channel.send(text)
+
+
+# ---------------------------------------------------------------------------
+# Voting system — commands
+# ---------------------------------------------------------------------------
+
+@bot.command()
+async def vote(ctx, duration: str = "60"):
+    """
+    Start an anime voting poll. Only one poll can be active at a time.
+    Usage: !vote 5m   (supports s, m, h, d suffixes — default is 60 seconds)
+    """
+    if get_active_poll():
+        return await ctx.send("A poll is already active. End it first with `!vote_stop`.")
+
+    seconds = parse_duration(duration)
+    if not seconds:
+        return await ctx.send("Invalid format. Try: `60`, `30s`, `5m`, `1h`")
+
+    end_time = time.time() + seconds
+
+    cur.execute(
+        "INSERT INTO polls (channel_id, message_id, creator_id, end_time, active) VALUES (?, ?, ?, ?, 1)",
+        (ctx.channel.id, 0, ctx.author.id, end_time)
+    )
+    db.commit()
+    poll_id = cur.lastrowid
+
+    msg = await ctx.send(embed=build_vote_embed(poll_id, end_time), view=VoteView())
+
+    cur.execute("UPDATE polls SET message_id=? WHERE id=?", (msg.id, poll_id))
+    db.commit()
+
+    bot.loop.create_task(vote_timer(poll_id))
+
+
+@bot.command()
+async def vote_stop(ctx):
+    """
+    Manage the current active poll (view results, continue, or delete).
+    Only the poll creator can use this.
+    Usage: !vote_stop
+    """
+    poll_id = get_active_poll()
+    if not poll_id:
+        return await ctx.send("No active poll.")
+
+    cur.execute("SELECT creator_id FROM polls WHERE id=?", (poll_id,))
+    row = cur.fetchone()
+    if not row or ctx.author.id != row[0]:
+        return await ctx.send("Only the poll creator can manage the poll.")
+
+    await ctx.send("⚙️ What do you want to do with the poll?", view=StopVoteView(poll_id))
 
 
 # Start the bot using your token
