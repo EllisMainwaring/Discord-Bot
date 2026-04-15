@@ -364,9 +364,14 @@ async def helps(ctx):
     "\n ------ESSENTIAL COMMANDS------"
     "\n- '!ping' -> displays 'pong' to check if the bot is working"
     "\n- '!animatedav' -> set the bot avatar using an attached animated GIF"
-    "\n- '!anime <voice actor name>' -> recommends an anime featuring that voice actor"
+    "\n- '!anime <anime name>' -> search for an anime and display its info"
+    "\n- '!recva <voice actor name>' -> recommends an anime featuring that voice actor (en or jp)"
     "\n- '!random' -> displays a random anime from AniList"
     "\n- '!charInfo' -> displays the details of the character inputted"
+    "\n"
+    "\n ------VOTING COMMANDS------"
+    "\n- '!vote <duration>' -> starts an anime voting poll (e.g. !vote 5m — supports s, m, h, d)"
+    "\n- '!vote_stop' -> manage the active poll (view results, continue, or delete)"
     "\n"
     "\n ------ANILIST ACCOUNT LINKING COMMANDS------"
     "\n- '!link <username>' -> links your Discord account to an AniList username"
@@ -1845,21 +1850,27 @@ async def vote_timer(poll_id: int):
 # Voting system — commands
 # ---------------------------------------------------------------------------
 
+# Command to start a new anime voting poll
+# Usage: !vote 5m  (default: 60 seconds — supports s, m, h, d suffixes)
 @bot.command()
 async def vote(ctx, duration: str = "60"):
     """
     Start an anime voting poll. Only one poll can be active at a time.
     Usage: !vote 5m   (supports s, m, h, d suffixes — default is 60 seconds)
     """
+    # Block a new poll if one is already running
     if get_active_poll():
         return await ctx.send("A poll is already active. End it first with `!vote_stop`.")
 
+    # Convert the duration string (e.g. "5m") to seconds
     seconds = parse_duration(duration)
     if not seconds:
         return await ctx.send("Invalid format. Try: `60`, `30s`, `5m`, `1h`")
 
+    # Calculate the Unix timestamp when the poll should expire
     end_time = time.time() + seconds
 
+    # Insert the new poll into the database (message_id is 0 until the message is sent)
     cur.execute(
         "INSERT INTO polls (channel_id, message_id, creator_id, end_time, active) VALUES (?, ?, ?, ?, 1)",
         (ctx.channel.id, 0, ctx.author.id, end_time)
@@ -1867,14 +1878,20 @@ async def vote(ctx, duration: str = "60"):
     db.commit()
     poll_id = cur.lastrowid
 
+    # Send the poll embed with the voting buttons
     msg = await ctx.send(embed=build_vote_embed(poll_id, end_time), view=VoteView())
 
+    # Now that we have the message ID, store it so the timer can edit the message later
     cur.execute("UPDATE polls SET message_id=? WHERE id=?", (msg.id, poll_id))
     db.commit()
 
+    # Start the background countdown timer for this poll
     bot.loop.create_task(vote_timer(poll_id))
 
 
+# Command to manage or stop the current active poll
+# Only the user who started the poll can use this
+# Usage: !vote_stop
 @bot.command()
 async def vote_stop(ctx):
     """
@@ -1886,11 +1903,13 @@ async def vote_stop(ctx):
     if not poll_id:
         return await ctx.send("No active poll.")
 
+    # Only allow the original poll creator to manage it
     cur.execute("SELECT creator_id FROM polls WHERE id=?", (poll_id,))
     row = cur.fetchone()
     if not row or ctx.author.id != row[0]:
         return await ctx.send("Only the poll creator can manage the poll.")
 
+    # Send a button menu with Continue / View Results / Delete options
     await ctx.send("⚙️ What do you want to do with the poll?", view=StopVoteView(poll_id))
 
 

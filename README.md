@@ -25,6 +25,7 @@ Discord bot for fetching anime data and managing AniList lists (AniList integrat
 - `.env` — stores your Discord token and AniList client ID (not committed to git)
 - `linked_accounts.json` — stores Discord → AniList account links and OAuth tokens (auto-created, not committed)
 - `episode_tracker.json` — tracks airing state for episode notifications (auto-created, not committed)
+- `votes.db` — SQLite database storing polls, options, and votes (auto-created, not committed)
 - `requirements.txt` — project dependencies
 - `discord.log` — bot logs
 - `.gitignore` — prevents sensitive files from being committed
@@ -36,8 +37,10 @@ Discord bot for fetching anime data and managing AniList lists (AniList integrat
 |---|---|
 | `!ping` | Check the bot is alive |
 | `!anime <name>` | Search for an anime and display its info |
+| `!recva <voice actor>` | Recommend an anime featuring that voice actor (EN or JP) |
 | `!random` | Display a random anime |
 | `!charInfo <name>` | Look up a character |
+| `!animatedav` | Set the bot's avatar using an attached animated GIF |
 
 ### AniList account linking
 | Command | Description |
@@ -62,6 +65,14 @@ These commands update your AniList directly from Discord. Requires a one-time to
 1. Run `!authanilist` — the bot will DM you an authorisation link
 2. Click the link, approve the bot on AniList, then copy your access token from the redirect URL
 3. Run `!settoken <your_token>` — the bot saves it and deletes your message
+
+### Voting
+Start a timed poll where server members vote on which anime to watch. Members add options via a popup and vote from a dropdown — each user gets one vote (changeable until the poll ends). Results are posted automatically when the timer expires.
+
+| Command | Description |
+|---|---|
+| `!vote <duration>` | Start a poll (e.g. `!vote 5m` — supports `s`, `m`, `h`, `d`; default 60s) |
+| `!vote_stop` | Manage the active poll — view results, continue, or delete (creator only) |
 
 ### Episode notifications
 The bot checks AniList every 30 minutes and DMs you when a new episode of something on your watching list has aired.
