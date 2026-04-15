@@ -24,7 +24,11 @@ jobs:
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
         run: |
-          docker run -d --name test-container -e DISCORD_TOKEN=$DISCORD_TOKEN anilist-bot-test
+          docker run -d --name test-container \
+            -e DISCORD_TOKEN=$DISCORD_TOKEN \
+            -e ANILIST_CLIENT_ID=$ANILIST_CLIENT_ID \
+            -e ANILIST_CLIENT_SECRET=$ANILIST_CLIENT_SECRET \
+            anilist-bot-test
           sleep 10
           if [ "$(docker inspect -f '{{.State.Running}}' test-container)" == "true" ]; then
             echo "Bot started successfully!"
@@ -34,3 +38,27 @@ jobs:
             docker logs test-container
             exit 1
           fi
+
+  deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Deploy to Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /home/ubuntu/bot1/Discord-Bot
+            git pull origin main
+            docker stop anime-bot-running || true
+            docker rm anime-bot-running || true
+            docker build -t anime-bot-image .
+            docker run -d --name anime-bot-running \
+              -e DISCORD_TOKEN=${{ secrets.DISCORD_TOKEN }} \
+              -e ANILIST_CLIENT_ID=${{ secrets.ANILIST_CLIENT_ID }} \
+              -e ANILIST_CLIENT_SECRET=${{ secrets.ANILIST_CLIENT_SECRET }} \
+              anime-bot-image

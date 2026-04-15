@@ -319,6 +319,73 @@ async def on_close():
 async def ping(ctx):
     await ctx.send("pong")
 
+# Command to set the bot avatar using an attached animated GIF
+# Usage: attach a GIF file and send !animatedav
+@bot.command()
+async def animatedav(ctx):
+    """
+    Set the bot's avatar from an attached animated GIF.
+    """
+    if not ctx.message.attachments:
+        await ctx.send(
+            "Please attach an animated GIF to this command. Use `!animatedav` with a GIF attachment."
+        )
+        return
+
+    attachment = ctx.message.attachments[0]
+    content_type = attachment.content_type or ""
+    if "gif" not in content_type and not attachment.filename.lower().endswith(".gif"):
+        await ctx.send("Error: The attachment must be an animated GIF.")
+        return
+
+    if attachment.size > 256000:
+        await ctx.send("Error: The GIF is too large. Discord avatar files must be under 256 KB.")
+        return
+
+    try:
+        avatar_bytes = await attachment.read()
+        await bot.user.edit(avatar=avatar_bytes)
+        await ctx.send("Avatar updated successfully!")
+    except discord.HTTPException as err:
+        await ctx.send(f"Error: Could not update avatar: {err}")
+    except Exception as err:
+        logging.error(f"Animated avatar update failed: {err}")
+        await ctx.send("Error: Something went wrong while updating the avatar.")
+
+# Command to allow users to see all the commands available using !helps
+@bot.command()
+async def helps(ctx):
+    await ctx.send("These are the currently available commands:"
+    "\n"
+    "\n ------IMPORTANT FOR FIRST TIME SETUP------"
+    "\n- '!authanilist' -> the bot will DM you an authorisation link"
+    "\n- '!settoken <your_token>' -> upon approval of the bot, put your token here and the bot will save and delete the message for security reasons"
+    "\n"
+    "\n ------ESSENTIAL COMMANDS------"
+    "\n- '!ping' -> displays 'pong' to check if the bot is working"
+    "\n- '!animatedav' -> set the bot avatar using an attached animated GIF"
+    "\n- '!anime <voice actor name>' -> recommends an anime featuring that voice actor"
+    "\n- '!random' -> displays a random anime from AniList"
+    "\n- '!charInfo' -> displays the details of the character inputted"
+    "\n"
+    "\n ------ANILIST ACCOUNT LINKING COMMANDS------"
+    "\n- '!link <username>' -> links your Discord account to an AniList username"
+    "\n- '!unlink' -> unlinks your Discord account from that AniList username"
+    "\n- '!profile' -> displays your AniList account stats"
+    "\n- '!profile @user' -> displays another user's AniList account stats"
+    "\n"
+    "\n ------ANILIST LIST UPDATING COMMANDS------"
+    "\n- '!watching <anime>' -> marks an anime as currently watching"
+    "\n- '!completed <anime>' -> marks an anime as completed"
+    "\n- '!pause <anime>' -> puts an anime on hold"
+    "\n- '!drop <anime>' -> puts an anime as dropped"
+    "\n- '!plan <anime>' -> adds an anime to your plan to watch"
+    "\n"
+    "\n ------NOTIFICATIONS COMMANDS------"
+    "\n- '!notify on' -> enables episode drop notifications (on by default)"
+    "\n- '!notify off' -> disables notifications"
+    "\n- '!notify' -> checks current notification settings"
+    "\n- '!testnotify' -> sends a test DM to confirm notifications are working")
 
 # Main command to search for any anime using AniList
 # Usage example: !anime naruto
@@ -424,6 +491,151 @@ async def anime(ctx, *, anime_name: str):
         logging.error(str(e))
 
         # Send a simple error message to the user
+        await ctx.send("Something went wrong fetching data.")
+
+# Command to recommend an anime by voice actor name
+# Usage example: !recva Rie Takahashi
+@bot.command()
+async def recva(ctx, *, actor_name: str):
+    """
+    Recommend an anime featuring the voice actor given.
+    The user can type any voice actor name after !recva.
+    """
+
+    # Tell the user the bot is working
+    await ctx.send(f"Searching for voice actor '{actor_name}' on AniList...")
+
+    query = """
+    query ($search: String) {
+      Staff(search: $search) {
+        name {
+          full
+        }
+        siteUrl
+        image {
+          large
+        }
+        staffMedia(perPage: 8, sort: [POPULARITY_DESC]) {
+          edges {
+            node {
+              id
+              title {
+                english
+                romaji
+              }
+              description
+              siteUrl
+              averageScore
+              genres
+              episodes
+              coverImage {
+                medium
+                large
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "search": actor_name
+    }
+    url = "https://graphql.anilist.co"
+
+    try:
+        async with bot.session.post(url, json={"query": query, "variables": variables}) as response:
+            data = await response.json()
+
+        if data.get("errors") or not data.get("data") or not data["data"].get("Staff"):
+            await ctx.send("Voice actor not found.")
+            return
+
+        staff = data["data"]["Staff"]
+        roles = staff.get("staffMedia", {}).get("edges", [])
+
+        if not roles:
+            await ctx.send(f"No anime roles found for **{staff['name']['full']}**.")
+            return
+
+        recommended = random.choice(roles)
+        media = recommended["node"]
+        media_id = media.get("id")
+        title = media["title"]["english"] or media["title"]["romaji"] or "Unknown Title"
+        episodes = media.get("episodes") or "Unknown"
+        score = media.get("averageScore") or "N/A"
+        genres = ", ".join(media.get("genres") or []) or "N/A"
+        site_url = media.get("siteUrl")
+        cover = media.get("coverImage", {})
+        image_url = cover.get("medium") or cover.get("large")
+        character_name = "Their role"
+        if media_id:
+            match_query = """
+            query ($id: Int) {
+              Media(id: $id) {
+                characters(perPage: 50) {
+                  edges {
+                    node {
+                      name {
+                        full
+                      }
+                    }
+                    voiceActors {
+                      name {
+                        full
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            try:
+                async with bot.session.post(
+                    url,
+                    json={"query": match_query, "variables": {"id": media_id}}
+                ) as match_response:
+                    match_data = await match_response.json()
+
+                character_edges = (
+                    match_data.get("data", {}).get("Media", {}).get("characters", {}).get("edges") or []
+                )
+                search_name = staff["name"]["full"].strip().lower()
+                for edge in character_edges:
+                    actors = edge.get("voiceActors") or []
+                    for actor in actors:
+                        actor_name = actor.get("name", {}).get("full", "").strip().lower()
+                        if actor_name == search_name or search_name in actor_name or actor_name in search_name:
+                            character_name = edge.get("node", {}).get("name", {}).get("full") or character_name
+                            break
+                    if character_name != "Their role":
+                        break
+            except Exception:
+                pass
+
+        raw_description = re.sub(r"<[^>]+>", "", media.get("description") or "No description available.")
+        description = (raw_description.strip() or "No description available.")[:300] + "..."
+
+        embed = discord.Embed(
+            title=title,
+            url=site_url,
+            description=description,
+            color=discord.Color.orange()
+        )
+        embed.set_author(name=f"Recommendation from {staff['name']['full']}", url=staff["siteUrl"])
+        embed.add_field(name="Character", value=character_name, inline=False)
+        embed.add_field(name="Episodes", value=str(episodes), inline=True)
+        embed.add_field(name="Average Score", value=str(score), inline=True)
+        embed.add_field(name="Genres", value=genres, inline=False)
+
+        if image_url:
+            embed.set_image(url=image_url)
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        logging.error(str(e))
         await ctx.send("Something went wrong fetching data.")
 
 
