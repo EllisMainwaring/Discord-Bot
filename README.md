@@ -93,8 +93,13 @@ The bot checks AniList every 30 minutes and DMs you when a new episode of someth
 ## The Team
 
 Team Leader: Ellis (https://github.com/EllisMainwaring)
+
 Scrum Master: Matei (https://github.com/mateiwaller)
+
 Infrastructure Lead: Shannon (https://github.com/my-entropy)
-Lead Developer: Dylan (https://github.com/dyllo06) 
+
+Lead Developer: Dylan (https://github.com/dyllo06)
+
 Feature Developer: Angelina (https://github.com/Angelina-EA)
+
 UI/UX Designer: Curtis (https://github.com/cunacurtis8-ux)
