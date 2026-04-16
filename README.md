@@ -89,3 +89,12 @@ The bot checks AniList every 30 minutes and DMs you when a new episode of someth
 - `.env` is ignored by git — your tokens will never be committed.
 - Always run the bot with `python bot.py` from inside the `anime_bot` folder.
 - Episode notifications require your AniList list to be public (the default).
+
+## The Team
+
+Team Leader: Ellis (https://github.com/EllisMainwaring)
+Scrum Master: Matei (https://github.com/mateiwaller)
+Infrastructure Lead: Shannon (https://github.com/my-entropy)
+Lead Developer: Dylan (https://github.com/dyllo06) 
+Feature Developer: Angelina (https://github.com/Angelina-EA)
+UI/UX Designer: Curtis (https://github.com/cunacurtis8-ux)
